@@ -28,7 +28,11 @@ SOURCES = {
     "eu24.csv": "https://static.data.gouv.fr/resources/resultats-des-elections-europeennes-du-9-juin-2024/20240613-154804/resultats-definitifs-par-bureau-de-vote.csv",
     "lg24_t1.csv": "https://static.data.gouv.fr/resources/elections-legislatives-des-30-juin-et-7-juillet-2024-resultats-definitifs-du-1er-tour/20240710-171445/resultats-definitifs-par-bureau-de-vote.csv",
     "contours.parquet": "https://data-pipeline-open.s3.sbg.io.cloud.ovh.net/reu/contours-france-entiere-latest-v2.parquet",
+    "nat1.zip": "https://www.insee.fr/fr/statistiques/fichier/8202752/TD_NAT1_2021_csv.zip",
 }
+# Non-inscrits : l'Insee regroupe les 15-24 ans ; on en compte 7 sur 10 comme majeurs (18-24 ans).
+PART_MAJEURS_15_24 = 0.7
+COMMUNE_MIN = 2000  # sous ce nombre de Français majeurs, l'estimation des non-inscrits est trop fragile
 # Outre-mer : codes « Z » des fichiers de la présidentielle → codes Insee des départements.
 OUTRE_MER = {"ZA": "971", "ZB": "972", "ZC": "973", "ZD": "974", "ZS": "975", "ZM": "976"}
 
@@ -131,6 +135,21 @@ def lire_legislatives(deps):
     return res
 
 
+def lire_insee():
+    """Français majeurs par commune (recensement 2021, tableau NAT1)."""
+    import io
+    import zipfile
+    adultes = {}
+    with zipfile.ZipFile(CACHE / "nat1.zip") as z:
+        nom = next(n for n in z.namelist() if n.endswith(".csv"))
+        for row in csv.DictReader(io.TextIOWrapper(z.open(nom), encoding="utf-8"), delimiter=";"):
+            if row["NIVGEO"] != "COM" or row["INATC"] != "1" or row["AGE4"] == "00":
+                continue
+            poids = PART_MAJEURS_15_24 if row["AGE4"] == "15" else 1
+            adultes[row["CODGEO"]] = adultes.get(row["CODGEO"], 0) + poids * float(row["NB"] or 0)
+    return adultes
+
+
 def part(d, cle):
     return d[cle] / d["exp"] if d and d["exp"] else None
 
@@ -165,6 +184,10 @@ def main():
     eu24 = lire_europeennes(deps)
     lg24 = lire_legislatives(deps)
     geo = contours(deps)
+    adultes = lire_insee()
+    inscrits_commune = {}
+    for bv, b in pr22.items():
+        inscrits_commune[bv[:5]] = inscrits_commune.get(bv[:5], 0) + b["inscrits"]
     print(f"bureaux : 2017 {len(pr17)}, 2022 {len(pr22)}, euro 2024 {len(eu24)}, légis 2024 {len(lg24)}, contours {len(geo)}")
 
     for dep in sorted({dep_of(c) for c in geo}):
@@ -197,7 +220,17 @@ def main():
             b["rang_reserve"] = i
         for i, b in enumerate(sorted([b for b in bureaux if b["bascule"] is not None], key=lambda b: -b["bascule"]), 1):
             b["rang_bascule"] = i
-        (OUT / f"{dep}.json").write_text(json.dumps({"dep": dep, "bureaux": bureaux}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        # Non-inscrits estimés, par commune : Français majeurs (Insee 2021) moins inscrits (2022).
+        communes = {}
+        for b in bureaux:
+            c = b["id"][:5]
+            if c in communes or c not in adultes:
+                continue
+            a, i = round(adultes[c]), inscrits_commune.get(c, 0)
+            communes[c] = {"nom": b["commune"], "adultes": a, "inscrits": i,
+                           "non_inscrits": max(0, a - i) if a >= COMMUNE_MIN else None,
+                           "taux": round(max(0, a - i) / a, 3) if a >= COMMUNE_MIN else None}
+        (OUT / f"{dep}.json").write_text(json.dumps({"dep": dep, "bureaux": bureaux, "communes": communes}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         feats = [{"type": "Feature", "properties": {"id": code}, "geometry": gj}
                  for code, (nom, gj) in geo.items() if dep_of(code) == dep]
         (OUT / f"{dep}-contours.json").write_text(json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":")), encoding="utf-8")

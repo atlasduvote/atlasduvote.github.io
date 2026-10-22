@@ -16,6 +16,11 @@
     serre:   { titre: "Bureaux serrés, par réserve de voix", unite: "voix", val: b => b.serre ? b.reserve : null, palette: "s",
                legende: "Bureaux serrés : réserve de mobilisation" },
   };
+  let communes = {};
+  const com = b => communes[b.id.slice(0, 5)];
+  IND.inscription = { titre: "Les 15 communes où inscrire", unite: "personnes", communes: true,
+    val: b => com(b)?.taux ?? null, palette: "t", pourcent: true,
+    legende: "Part des Français majeurs non inscrits dans leur commune (estimation)" };
   let ind = "reserve", bureaux = [], parId = {}, couche = null, breaks = [], selection = null, deps = [];
 
   const map = L.map("carte", { zoomSnap: 0.5, preferCanvas: true });
@@ -43,7 +48,7 @@
     const p = IND[ind].palette;
     $("legende").innerHTML = `<b>${esc(IND[ind].legende)}</b>
       <div class="ech">${[1, 2, 3, 4, 5].map(k => `<i style="background:var(--${p}${k})"></i>`).join("")}</div>
-      <div class="bornes"><span>${fmt(breaks.min)}</span><span>${fmt(breaks[1])}</span><span>${fmt(breaks[3])}</span><span>${fmt(breaks.max)}</span></div>`;
+      <div class="bornes">${[breaks.min, breaks[1], breaks[3], breaks.max].map(v => `<span>${IND[ind].pourcent ? pct(v) : fmt(v)}</span>`).join("")}</div>`;
   }
 
   function filtres() {
@@ -52,7 +57,22 @@
       .sort((a, b) => IND[ind].val(b) - IND[ind].val(a)).slice(0, 15);
   }
 
+  function topCommunes() {
+    const q = nq($("commune").value.trim());
+    return Object.entries(communes).filter(([, c]) => c.non_inscrits != null && (!q || nq(c.nom).includes(q)))
+      .sort((a, b) => b[1].non_inscrits - a[1].non_inscrits).slice(0, 15);
+  }
+
   function liste() {
+    if (IND[ind].communes) {
+      const top = topCommunes();
+      $("titre-liste").textContent = IND[ind].titre;
+      $("liste").innerHTML = top.length ? top.map(([code, c], i) => `<li><button data-commune="${code}">
+        <span class="rg">${i + 1}</span><span>${esc(c.nom)}<small>${pct(c.taux)} des ${fmt(c.adultes)} Français majeurs</small></span>
+        <span class="val">${fmt(c.non_inscrits)}</span></button></li>`).join("")
+        : `<li class="note">Aucune commune ne correspond (estimation faite pour les communes de plus de 2 000 Français majeurs).</li>`;
+      return;
+    }
     const top = filtres();
     $("titre-liste").textContent = IND[ind].titre;
     $("liste").innerHTML = top.length ? top.map((b, i) => `<li><button data-id="${b.id}">
@@ -70,6 +90,7 @@
         <div><b>${fmt(b.reserve)}</b><span>voix en réserve · ${ord(b.rang_reserve)} du département</span></div>
         <div><b>${fmt(b.bascule)}</b><span>${b.bascule == null ? "périmètre modifié depuis 2017" : `voix basculées · ${ord(b.rang_bascule)} du département`}</span></div>
       </div>
+      ${com(b)?.non_inscrits != null ? `<p class="note">Dans la commune : environ ${fmt(com(b).non_inscrits)} Français majeurs non inscrits sur ses listes (${pct(com(b).taux)}).</p>` : ""}
       <table><thead><tr><th>Élection</th><th>Gauche</th><th>RN</th></tr></thead><tbody>
         ${ligne("Présidentielle 2017", "2017")}${ligne("Présidentielle 2022", "2022")}${ligne("Européennes 2024", "euro24")}${ligne("Législatives 2024", "legis24")}
       </tbody></table>`;
@@ -97,7 +118,7 @@
 
   async function charge(dep) {
     const [d, geo] = await Promise.all([fetch(`data/${dep}.json`).then(r => r.json()), fetch(`data/${dep}-contours.json`).then(r => r.json())]);
-    bureaux = d.bureaux; parId = Object.fromEntries(bureaux.map(b => [b.id, b])); selection = null;
+    bureaux = d.bureaux; communes = d.communes || {}; parId = Object.fromEntries(bureaux.map(b => [b.id, b])); selection = null;
     $("detail").hidden = true;
     if (couche) map.removeLayer(couche);
     calculeBornes();
@@ -121,11 +142,20 @@
     redessine();
   });
   $("commune").addEventListener("input", liste);
-  $("liste").addEventListener("click", e => { const b = e.target.closest("button[data-id]"); if (b) choisit(b.dataset.id, true); });
+  $("liste").addEventListener("click", e => {
+    const b = e.target.closest("button[data-id]"); if (b) return choisit(b.dataset.id, true);
+    const c = e.target.closest("button[data-commune]"); if (!c) return;
+    const zone = L.featureGroup(); couche.eachLayer(l => { if (l.feature.properties.id.startsWith(c.dataset.commune + "_")) zone.addLayer(l); });
+    if (zone.getLayers().length) map.fitBounds(zone.getBounds(), { padding: [30, 30] });
+  });
   $("dep").addEventListener("change", e => charge(e.target.value));
 
   // Liste prête à coller dans un groupe WhatsApp de bénévoles.
   $("copier").addEventListener("click", () => {
+    if (IND[ind].communes) {
+      const texte = `${IND[ind].titre} :\n` + topCommunes().map(([, c], i) => `${i + 1}. ${c.nom} – environ ${fmt(c.non_inscrits)} non-inscrits (${pct(c.taux)})`).join("\n");
+      return navigator.clipboard?.writeText(texte).then(() => { $("copie-note").textContent = "Liste copiée."; }).catch(() => { $("copie-note").textContent = texte; });
+    }
     const top = filtres();
     const texte = `${IND[ind].titre} :\n` + top.map((b, i) => `${i + 1}. ${b.commune} – bureau ${numero(b.id)} (${fmt(IND[ind].val(b))} ${IND[ind].unite})`).join("\n");
     const ok = () => { $("copie-note").textContent = "Liste copiée."; };
