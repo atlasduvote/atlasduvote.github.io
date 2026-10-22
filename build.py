@@ -1,6 +1,6 @@
 """Calcule, pour chaque bureau de vote, où la gauche a le plus de voix à gagner.
 
-    python build.py            # départements listés dans DEPARTEMENTS
+    python build.py            # tous les départements qui ont des contours de bureaux
     python build.py 59 62      # départements choisis
 
 Entrées (cache/, téléchargées depuis data.gouv.fr) :
@@ -13,14 +13,24 @@ Sortie : site/data/<dep>.json (indicateurs) et site/data/<dep>-contours.json (Ge
 """
 import csv
 import json
+import shutil
 import statistics
 import sys
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 CACHE = ROOT / "cache"
 OUT = ROOT / "site" / "data"
-DEPARTEMENTS = ["59"]
+SOURCES = {
+    "pr17_t1.txt": "https://static.data.gouv.fr/resources/election-presidentielle-des-23-avril-et-7-mai-2017-resultats-definitifs-du-1er-tour-par-bureaux-de-vote/20170427-100955/PR17_BVot_T1_FE.txt",
+    "pr22_t1.txt": "https://static.data.gouv.fr/resources/election-presidentielle-des-10-et-24-avril-2022-resultats-definitifs-du-1er-tour/20220414-152542/resultats-par-niveau-burvot-t1-france-entiere.txt",
+    "eu24.csv": "https://static.data.gouv.fr/resources/resultats-des-elections-europeennes-du-9-juin-2024/20240613-154804/resultats-definitifs-par-bureau-de-vote.csv",
+    "lg24_t1.csv": "https://static.data.gouv.fr/resources/elections-legislatives-des-30-juin-et-7-juillet-2024-resultats-definitifs-du-1er-tour/20240710-171445/resultats-definitifs-par-bureau-de-vote.csv",
+    "contours.parquet": "https://data-pipeline-open.s3.sbg.io.cloud.ovh.net/reu/contours-france-entiere-latest-v2.parquet",
+}
+# Outre-mer : codes « Z » des fichiers de la présidentielle → codes Insee des départements.
+OUTRE_MER = {"ZA": "971", "ZB": "972", "ZC": "973", "ZD": "974", "ZS": "975", "ZM": "976"}
 
 # Périmètre de la gauche : LFI, PS, écologistes, PCF.
 GAUCHE = {
@@ -39,6 +49,19 @@ def num(x):
     return int(x or 0)
 
 
+def dep_of(bv):
+    """Département d'un bureau, d'après le code Insee de sa commune (59350_0626 → 59, 97411_0001 → 974)."""
+    return bv[:3] if bv.startswith("97") else bv[:2]
+
+
+def telecharge():
+    CACHE.mkdir(exist_ok=True)
+    for nom, url in SOURCES.items():
+        if not (CACHE / nom).exists():
+            print(f"Téléchargement {url}")
+            urllib.request.urlretrieve(url, CACHE / nom)
+
+
 def lire_presidentielle(fichier, election, deps):
     """Fichiers 2017 et 2022 : 21 colonnes fixes, puis 7 colonnes par candidat."""
     res = {}
@@ -46,11 +69,21 @@ def lire_presidentielle(fichier, election, deps):
         r = csv.reader(f, delimiter=";")
         next(r)
         for row in r:
-            dep = row[0].zfill(2)
-            if dep not in deps:
+            code = row[0].zfill(2)
+            commune = row[4].zfill(3)
+            if code in OUTRE_MER:
+                if code == "ZM" and fichier.startswith("pr17"):
+                    commune = "6" + commune[1:]  # Mayotte : communes numérotées 5xx en 2017, 6xx ensuite
+                insee = "97" + commune
+            elif code.startswith("Z"):
+                continue  # territoires sans contours de bureaux, Français de l'étranger
+            else:
+                insee = code + commune
+            bv = f"{insee}_{row[6].zfill(4)}"
+            dep = dep_of(bv)
+            if deps and dep not in deps:
                 continue
             NOMS[dep] = row[1]
-            bv = f"{dep}{row[4].zfill(3)}_{row[6].zfill(4)}"
             exp = num(row[18])
             voix = {row[i + 2]: num(row[i + 4]) for i in range(21, len(row) - 6, 7)}
             res[bv] = {"inscrits": num(row[7]), "abst": num(row[8]), "exp": exp,
@@ -65,9 +98,9 @@ def lire_europeennes(deps):
         r = csv.reader(f, delimiter=";")
         next(r)
         for row in r:
-            if row[2] not in deps:
+            bv = f"{row[4].zfill(5)}_{row[6].zfill(4)}"
+            if deps and dep_of(bv) not in deps:
                 continue
-            bv = f"{row[4]}_{row[6].zfill(4)}"
             listes = {}
             for i in range(21, len(row) - 4, 8):
                 if row[i + 1]:
@@ -82,10 +115,9 @@ def lire_legislatives(deps):
     res = {}
     with open(CACHE / "lg24_t1.csv", encoding="utf-8") as f:
         for row in csv.DictReader(f, delimiter=";"):
-            dep = row["Code département"].zfill(2)
-            if dep not in deps:
-                continue
             bv = f"{row['Code commune'].zfill(5)}_{row['Code BV'].zfill(4)}"
+            if deps and dep_of(bv) not in deps:
+                continue
             g = rn = 0
             for i in range(1, 30):
                 nu = row.get(f"Nuance candidat {i}")
@@ -104,14 +136,14 @@ def part(d, cle):
 
 
 def contours(deps):
-    import pyarrow.compute as pc
     import pyarrow.parquet as pq
     from shapely import wkb
     from shapely.geometry import mapping
-    t = pq.read_table(CACHE / "contours.parquet", columns=["codeDepartement", "codeBureauVote", "nomCommune", "geom"])
-    t = t.filter(pc.is_in(t["codeDepartement"], value_set=__import__("pyarrow").array(deps)))
+    t = pq.read_table(CACHE / "contours.parquet", columns=["codeBureauVote", "nomCommune", "geom"])
     out = {}
     for code, nom, geom in zip(t["codeBureauVote"].to_pylist(), t["nomCommune"].to_pylist(), t["geom"].to_pylist()):
+        if deps and dep_of(code) not in deps:
+            continue
         g = wkb.loads(geom).simplify(0.00008, preserve_topology=True)
         gj = mapping(g)
         arrondi = lambda c: [[round(x, 5), round(y, 5)] for x, y in c]
@@ -124,9 +156,9 @@ def contours(deps):
 
 
 def main():
-    deps = [d.zfill(2) for d in sys.argv[1:]] or DEPARTEMENTS
+    deps = [d.zfill(2) for d in sys.argv[1:]]  # vide : tous
+    telecharge()
     OUT.mkdir(parents=True, exist_ok=True)
-    import shutil
     shutil.copytree(ROOT / "static", OUT.parent, dirs_exist_ok=True)
     pr17 = lire_presidentielle("pr17_t1.txt", "pr17", deps)
     pr22 = lire_presidentielle("pr22_t1.txt", "pr22", deps)
@@ -135,16 +167,17 @@ def main():
     geo = contours(deps)
     print(f"bureaux : 2017 {len(pr17)}, 2022 {len(pr22)}, euro 2024 {len(eu24)}, légis 2024 {len(lg24)}, contours {len(geo)}")
 
-    for dep in deps:
+    for dep in sorted({dep_of(c) for c in geo}):
         bureaux = []
         for bv, b22 in pr22.items():
-            if not bv.startswith(dep):
+            if dep_of(bv) != dep:
                 continue
             b17, be, bl = pr17.get(bv), eu24.get(bv), lg24.get(bv)
             g = {k: part(d, "gauche") for k, d in (("2017", b17), ("2022", b22), ("euro24", be), ("legis24", bl))}
             rn = {k: part(d, "rn") for k, d in (("2017", b17), ("2022", b22), ("euro24", be), ("legis24", bl))}
             # Le bureau a-t-il gardé le même périmètre depuis 2017 ? Sinon la comparaison n'a pas de sens.
-            comparable = bool(b17) and abs(b17["inscrits"] - b22["inscrits"]) <= ECART_INSCRITS * b22["inscrits"]
+            comparable = (bool(b17) and rn["2017"] is not None
+                          and abs(b17["inscrits"] - b22["inscrits"]) <= ECART_INSCRITS * b22["inscrits"])
             reserve = round(b22["abst"] * (g["2022"] or 0))
             rn_recent = rn["legis24"] if rn["legis24"] is not None else rn["2022"]
             bascule = round(b22["exp"] * max(0, rn_recent - rn["2017"]) * g["2017"]) if comparable and rn_recent is not None else None
@@ -160,26 +193,24 @@ def main():
                 "volatilite": round(statistics.pstdev(parts_g), 3) if len(parts_g) > 1 else None,
                 "contour": bv in geo,
             })
-        # Noms de commune manquants (bureau sans contour) : on les reprend des résultats 2022.
-        for b in bureaux:
-            b["rang_reserve"] = None
         for i, b in enumerate(sorted(bureaux, key=lambda b: -b["reserve"]), 1):
             b["rang_reserve"] = i
         for i, b in enumerate(sorted([b for b in bureaux if b["bascule"] is not None], key=lambda b: -b["bascule"]), 1):
             b["rang_bascule"] = i
         (OUT / f"{dep}.json").write_text(json.dumps({"dep": dep, "bureaux": bureaux}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         feats = [{"type": "Feature", "properties": {"id": code}, "geometry": gj}
-                 for code, (nom, gj) in geo.items() if code.startswith(dep)]
+                 for code, (nom, gj) in geo.items() if dep_of(code) == dep]
         (OUT / f"{dep}-contours.json").write_text(json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":")), encoding="utf-8")
         sans = sum(1 for b in bureaux if not b["contour"])
         print(f"{dep} : {len(bureaux)} bureaux, {sum(1 for b in bureaux if b['comparable'])} comparables depuis 2017, "
               f"{sum(1 for b in bureaux if b['serre'])} serrés, {sans} sans contour, "
-              f"réserve totale {sum(b['reserve'] for b in bureaux):,} voix")
+              f"réserve {sum(b['reserve'] for b in bureaux):,} voix")
 
 
 def index():
     """Liste des départements déjà calculés, pour le menu du site."""
-    codes = sorted(p.stem for p in OUT.glob("*.json") if p.stem.isalnum() and not p.stem.endswith("contours") and p.stem != "index")
+    codes = sorted((p.stem for p in OUT.glob("*.json") if p.stem.isalnum() and p.stem != "index"),
+                   key=lambda c: (len(c) > 2, c.replace("2A", "20.1").replace("2B", "20.2")))
     anciens = {d["code"]: d["nom"] for d in json.loads((OUT / "index.json").read_text(encoding="utf-8"))} if (OUT / "index.json").exists() else {}
     (OUT / "index.json").write_text(json.dumps([{"code": c, "nom": NOMS.get(c) or anciens.get(c, c)} for c in codes], ensure_ascii=False), encoding="utf-8")
 
