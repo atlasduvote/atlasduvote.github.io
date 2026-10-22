@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Atlas du vote</title>
+<meta name="description" content="Où se trouvent les voix de gauche à aller chercher : abstention, bascules vers le RN et bureaux serrés, bureau de vote par bureau de vote.">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="style.css">
+<script src="vendor/leaflet.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="barre">
+  <div class="titre">
+    <h1>Atlas du vote</h1>
+    <p>Où aller chercher les voix, bureau de vote par bureau de vote.</p>
+  </div>
+  <label class="champ">Département
+    <select id="dep"></select>
+  </label>
+</header>
+
+<main class="grille">
+  <aside class="panneau">
+    <section>
+      <h2>Que chercher ?</h2>
+      <div class="choix" id="indicateurs" role="radiogroup" aria-label="Indicateur affiché">
+        <button role="radio" aria-checked="true" data-ind="reserve"><b>Réserve de mobilisation</b><span>Voix de gauche « en réserve » chez les abstentionnistes</span></button>
+        <button role="radio" aria-checked="false" data-ind="bascule"><b>Bascule vers le RN</b><span>Progression du RN là où la gauche pesait en 2017</span></button>
+        <button role="radio" aria-checked="false" data-ind="serre"><b>Bureaux serrés</b><span>Moins de 10 points entre gauche et RN aux législatives 2024</span></button>
+      </div>
+    </section>
+
+    <section>
+      <div class="entete-liste">
+        <h2 id="titre-liste">Les 15 bureaux prioritaires</h2>
+        <button class="lien" id="copier">Copier la liste</button>
+      </div>
+      <input type="search" id="commune" placeholder="Filtrer par commune : Roubaix, Denain…" aria-label="Filtrer par commune">
+      <ol class="liste" id="liste"></ol>
+      <p class="note" id="copie-note" aria-live="polite"></p>
+    </section>
+
+    <section id="detail" class="detail" hidden></section>
+
+    <details class="methode">
+      <summary>Comment c'est calculé</summary>
+      <p><b>Gauche</b> : LFI, PS, écologistes et PCF (Mélenchon, Hidalgo, Jadot, Roussel en 2022 ; Mélenchon, Hamon en 2017 ; listes LFI, PS-Place publique, Écologistes et PCF aux européennes 2024 ; Nouveau Front populaire aux législatives 2024).</p>
+      <p><b>Réserve de mobilisation</b> = abstentionnistes de la présidentielle 2022 × part de la gauche parmi les votants du bureau. C'est un ordre de grandeur : il suppose que les abstentionnistes ressemblent aux votants de leur bureau.</p>
+      <p><b>Bascule vers le RN</b> = votants 2022 × hausse du RN entre la présidentielle 2017 et les législatives 2024 × part de la gauche en 2017. Ces chiffres montrent que le bureau a basculé, pas que les mêmes personnes ont changé de vote. Les bureaux dont le nombre d'inscrits a varié de plus de 25 % depuis 2017 sont exclus : leur périmètre a sans doute changé.</p>
+      <p><b>Sources</b> : ministère de l'Intérieur (résultats par bureau de vote), Etalab et Insee (contours des bureaux de vote, qui restent approximatifs), sur data.gouv.fr. Fond de carte © contributeurs OpenStreetMap.</p>
+    </details>
+  </aside>
+
+  <div class="carte-zone">
+    <div id="carte" aria-label="Carte des bureaux de vote"></div>
+    <div class="legende" id="legende"></div>
+  </div>
+</main>
+</body>
+</html>
