@@ -46,7 +46,8 @@ GAUCHE = {
 RN = {"pr17": {"LE PEN"}, "pr22": {"LE PEN"}, "eu24": {"LRN"}, "lg24": {"RN", "UXD"}}
 SERRE = 0.10          # écart gauche / RN sous lequel un bureau est « serré » (législatives 2024)
 NOMS = {}  # code département -> nom, rempli à la lecture des résultats
-ECART_INSCRITS = 0.25 # au-delà, le bureau a probablement changé de périmètre entre 2017 et 2022
+ECART_INSCRITS = 0.25
+INSCRITS_MAX = 4000   # au-delà, ce n'est pas un bureau de quartier (bureau spécial, comme « JUS1 » à Paris) : exclu des classements # au-delà, le bureau a probablement changé de périmètre entre 2017 et 2022
 
 
 def num(x):
@@ -90,7 +91,7 @@ def lire_presidentielle(fichier, election, deps):
             NOMS[dep] = row[1]
             exp = num(row[18])
             voix = {row[i + 2]: num(row[i + 4]) for i in range(21, len(row) - 6, 7)}
-            res[bv] = {"inscrits": num(row[7]), "abst": num(row[8]), "exp": exp,
+            res[bv] = {"nom": row[5], "inscrits": num(row[7]), "abst": num(row[8]), "exp": exp,
                        "gauche": sum(v for k, v in voix.items() if k in GAUCHE[election]),
                        "rn": sum(v for k, v in voix.items() if k in RN[election])}
     return res
@@ -170,7 +171,7 @@ def contours(deps):
             gj = {"type": "MultiPolygon", "coordinates": [[arrondi(r) for r in gj["coordinates"]]]}
         else:
             gj = {"type": "MultiPolygon", "coordinates": [[arrondi(r) for r in p] for p in gj["coordinates"]]}
-        out[code] = (nom, gj)
+        out[code] = (nom, gj, g)
     return out
 
 
@@ -190,6 +191,8 @@ def main():
         inscrits_commune[bv[:5]] = inscrits_commune.get(bv[:5], 0) + b["inscrits"]
     print(f"bureaux : 2017 {len(pr17)}, 2022 {len(pr22)}, euro 2024 {len(eu24)}, légis 2024 {len(lg24)}, contours {len(geo)}")
 
+    from shapely.geometry import mapping
+    france, tous, toutes_communes, formes = {}, [], {}, []
     for dep in sorted({dep_of(c) for c in geo}):
         bureaux = []
         for bv, b22 in pr22.items():
@@ -201,12 +204,15 @@ def main():
             # Le bureau a-t-il gardé le même périmètre depuis 2017 ? Sinon la comparaison n'a pas de sens.
             comparable = (bool(b17) and rn["2017"] is not None
                           and abs(b17["inscrits"] - b22["inscrits"]) <= ECART_INSCRITS * b22["inscrits"])
-            reserve = round(b22["abst"] * (g["2022"] or 0))
+            atypique = b22["inscrits"] > INSCRITS_MAX
+            if atypique:
+                comparable = False
+            reserve = None if atypique else round(b22["abst"] * (g["2022"] or 0))
             rn_recent = rn["legis24"] if rn["legis24"] is not None else rn["2022"]
             bascule = round(b22["exp"] * max(0, rn_recent - rn["2017"]) * g["2017"]) if comparable and rn_recent is not None else None
             serre = (bl is not None and g["legis24"] is not None and abs(g["legis24"] - rn["legis24"]) < SERRE)
             parts_g = [v for v in g.values() if v is not None]
-            nom, _ = geo.get(bv, (None, None))
+            nom = (geo[bv][0] if bv in geo else None) or b22["nom"]
             bureaux.append({
                 "id": bv, "commune": nom, "inscrits": b22["inscrits"],
                 "abst22": round(b22["abst"] / b22["inscrits"], 3) if b22["inscrits"] else None,
@@ -216,7 +222,7 @@ def main():
                 "volatilite": round(statistics.pstdev(parts_g), 3) if len(parts_g) > 1 else None,
                 "contour": bv in geo,
             })
-        for i, b in enumerate(sorted(bureaux, key=lambda b: -b["reserve"]), 1):
+        for i, b in enumerate(sorted([b for b in bureaux if b["reserve"] is not None], key=lambda b: -b["reserve"]), 1):
             b["rang_reserve"] = i
         for i, b in enumerate(sorted([b for b in bureaux if b["bascule"] is not None], key=lambda b: -b["bascule"]), 1):
             b["rang_bascule"] = i
@@ -232,12 +238,67 @@ def main():
                            "taux": round(max(0, a - i) / a, 3) if a >= COMMUNE_MIN else None}
         (OUT / f"{dep}.json").write_text(json.dumps({"dep": dep, "bureaux": bureaux, "communes": communes}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         feats = [{"type": "Feature", "properties": {"id": code}, "geometry": gj}
-                 for code, (nom, gj) in geo.items() if dep_of(code) == dep]
+                 for code, (nom, gj, _) in geo.items() if dep_of(code) == dep]
         (OUT / f"{dep}-contours.json").write_text(json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":")), encoding="utf-8")
+        # Vue France : contour du département, totaux, et bureaux / communes pour les classements nationaux.
+        forme = contour_departement([g for code, (_, _, g) in geo.items() if dep_of(code) == dep])
+        formes.append({"type": "Feature", "properties": {"dep": dep}, "geometry": mapping(forme)})
+        xmin, ymin, xmax, ymax = forme.bounds
+        france[dep] = {"nom": NOMS.get(dep, dep), "bbox": [round(ymin, 3), round(xmin, 3), round(ymax, 3), round(xmax, 3)],
+                       "bureaux": len(bureaux), "reserve": sum(b["reserve"] or 0 for b in bureaux),
+                       "bascule": sum(b["bascule"] or 0 for b in bureaux), "serre": sum(1 for b in bureaux if b["serre"]),
+                       "inscription": sum(c["non_inscrits"] or 0 for c in communes.values())}
+        tous += [dict(b, dep=dep) for b in bureaux]
+        for code, c in communes.items():
+            toutes_communes[code] = dict(c, dep=dep)
         sans = sum(1 for b in bureaux if not b["contour"])
         print(f"{dep} : {len(bureaux)} bureaux, {sum(1 for b in bureaux if b['comparable'])} comparables depuis 2017, "
               f"{sum(1 for b in bureaux if b['serre'])} serrés, {sans} sans contour, "
-              f"réserve {sum(b['reserve'] for b in bureaux):,} voix")
+              f"réserve {sum(b['reserve'] or 0 for b in bureaux):,} voix")
+    if not deps:
+        ecrit_france(france, tous, toutes_communes, formes)
+
+
+def contour_departement(geoms):
+    """Réunit les bureaux d'un département en un contour léger : on comble les interstices entre bureaux,
+    on supprime les trous et les îlots minuscules, puis on simplifie."""
+    from shapely import unary_union
+    from shapely.geometry import MultiPolygon, Polygon
+    u = unary_union([g.buffer(0.002) for g in geoms]).buffer(-0.002)
+    polys = [Polygon(p.exterior) for p in (u.geoms if hasattr(u, "geoms") else [u])]
+    grand = max(p.area for p in polys)
+    polys = [p for p in polys if p.area > grand * 0.002]
+    return MultiPolygon(polys).simplify(0.008, preserve_topology=True)
+
+
+def ecrit_france(france, tous, toutes_communes, formes):
+    """Fichiers de la vue nationale : départements, classements et index des communes."""
+    if not france:
+        return
+    court = lambda b, v: {"id": b["id"], "dep": b["dep"], "commune": b["commune"], "inscrits": b["inscrits"], "abst22": b["abst22"], "v": v}
+    top = {
+        "reserve": [court(b, b["reserve"]) for b in sorted([b for b in tous if b["reserve"] is not None], key=lambda b: -b["reserve"])[:300]],
+        "bascule": [court(b, b["bascule"]) for b in sorted([b for b in tous if b["bascule"] is not None], key=lambda b: -b["bascule"])[:300]],
+        "serre": [court(b, b["reserve"]) for b in sorted([b for b in tous if b["serre"] and b["reserve"] is not None], key=lambda b: -b["reserve"])[:300]],
+        "inscription": [{"code": k, "dep": c["dep"], "nom": c["nom"], "adultes": c["adultes"], "taux": c["taux"], "v": c["non_inscrits"]}
+                        for k, c in sorted([x for x in toutes_communes.items() if x[1]["non_inscrits"]], key=lambda x: -x[1]["non_inscrits"])[:300]],
+    }
+    # Bornes nationales des cinq classes de couleur, pour que tous les départements partagent la même échelle.
+    def bornes(valeurs):
+        v = sorted(x for x in valeurs if x is not None)
+        return [v[int(q * (len(v) - 1))] for q in (0.2, 0.4, 0.6, 0.8)] + [v[0], v[-1]]
+    taux = {k: c["taux"] for k, c in toutes_communes.items()}
+    echelles = {
+        "reserve": bornes(b["reserve"] for b in tous),
+        "bascule": bornes(b["bascule"] for b in tous),
+        "serre": bornes(b["reserve"] for b in tous if b["serre"]),
+        "inscription": bornes(taux.get(b["id"][:5]) for b in tous),
+    }
+    (OUT / "france.json").write_text(json.dumps({"departements": france, "top": top, "bornes": echelles}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    (OUT / "departements.json").write_text(json.dumps({"type": "FeatureCollection", "features": formes}, separators=(",", ":")), encoding="utf-8")
+    # Index des communes pour la recherche : nom → département (le site charge ensuite le bon département).
+    idx = sorted({(b["commune"], b["dep"]) for b in tous if b["commune"]})
+    (OUT / "communes.json").write_text(json.dumps(idx, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def index():
