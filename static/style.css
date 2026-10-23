@@ -32,6 +32,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .choix button[aria-checked="true"]{border-color:var(--accent);background:var(--accent-soft)}
 .entete-liste{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
 .lien{background:none;border:0;color:var(--accent);font-weight:600;padding:0}
+#quartier{margin-top:6px}
 .liste{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px}
 .liste li button{width:100%;display:grid;grid-template-columns:1.8rem 1fr auto;gap:8px;align-items:baseline;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
 .liste li button:hover{border-color:var(--accent)}

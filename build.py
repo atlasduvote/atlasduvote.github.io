@@ -42,8 +42,10 @@ GAUCHE = {
     "pr22": {"MÉLENCHON", "HIDALGO", "JADOT", "ROUSSEL"},
     "eu24": {"LFI", "LUG", "LVEC", "LCOM"},     # LFI, Réveiller l'Europe (PS-PP), Europe Écologie, Gauche unie (PCF)
     "lg24": {"UG"},                            # Union de la gauche (Nouveau Front populaire)
+    "lg24_om": {"UG", "DVG"},                  # outre-mer : la gauche s'y présente souvent en « divers gauche »
 }
 RN = {"pr17": {"LE PEN"}, "pr22": {"LE PEN"}, "eu24": {"LRN"}, "lg24": {"RN", "UXD"}}
+DUEL_MIN = 0.20      # part minimale de la gauche et du RN pour parler de duel
 SERRE = 0.10          # écart gauche / RN sous lequel un bureau est « serré » (législatives 2024)
 NOMS = {}  # code département -> nom, rempli à la lecture des résultats
 ECART_INSCRITS = 0.25
@@ -129,7 +131,7 @@ def lire_legislatives(deps):
                 if not nu:
                     break
                 v = num(row[f"Voix {i}"])
-                g += v if nu in GAUCHE["lg24"] else 0
+                g += v if nu in GAUCHE["lg24_om" if bv.startswith("97") else "lg24"] else 0
                 rn += v if nu in RN["lg24"] else 0
             res[bv] = {"inscrits": num(row["Inscrits"]), "abst": num(row["Abstentions"]),
                        "exp": num(row["Exprimés"]), "gauche": g, "rn": rn}
@@ -186,6 +188,9 @@ def main():
     lg24 = lire_legislatives(deps)
     geo = contours(deps)
     adultes = lire_insee()
+    # Profils sociaux (Insee Filosofi 2021), produits par scripts/profils.py.
+    fp = ROOT / "data" / "profils.json"
+    profils = json.loads(fp.read_text(encoding="utf-8")) if fp.exists() else {"bureaux": {}, "france": None}
     inscrits_commune = {}
     for bv, b in pr22.items():
         inscrits_commune[bv[:5]] = inscrits_commune.get(bv[:5], 0) + b["inscrits"]
@@ -210,7 +215,9 @@ def main():
             reserve = None if atypique else round(b22["abst"] * (g["2022"] or 0))
             rn_recent = rn["legis24"] if rn["legis24"] is not None else rn["2022"]
             bascule = round(b22["exp"] * max(0, rn_recent - rn["2017"]) * g["2017"]) if comparable and rn_recent is not None else None
-            serre = (bl is not None and g["legis24"] is not None and abs(g["legis24"] - rn["legis24"]) < SERRE)
+            # Serré : vrai duel gauche / RN, chacun au moins à 20 %, avec moins de 10 points d'écart.
+            serre = (bl is not None and g["legis24"] is not None and min(g["legis24"], rn["legis24"]) >= DUEL_MIN
+                     and abs(g["legis24"] - rn["legis24"]) < SERRE)
             parts_g = [v for v in g.values() if v is not None]
             nom = (geo[bv][0] if bv in geo else None) or b22["nom"]
             bureaux.append({
@@ -221,6 +228,7 @@ def main():
                 "reserve": reserve, "bascule": bascule, "serre": serre, "comparable": comparable,
                 "volatilite": round(statistics.pstdev(parts_g), 3) if len(parts_g) > 1 else None,
                 "contour": bv in geo,
+                "profil": profils["bureaux"].get(bv),
             })
         for i, b in enumerate(sorted([b for b in bureaux if b["reserve"] is not None], key=lambda b: -b["reserve"]), 1):
             b["rang_reserve"] = i
@@ -275,11 +283,11 @@ def ecrit_france(france, tous, toutes_communes, formes):
     """Fichiers de la vue nationale : départements, classements et index des communes."""
     if not france:
         return
-    court = lambda b, v: {"id": b["id"], "dep": b["dep"], "commune": b["commune"], "inscrits": b["inscrits"], "abst22": b["abst22"], "v": v}
+    court = lambda b, v: {"id": b["id"], "dep": b["dep"], "commune": b["commune"], "inscrits": b["inscrits"], "abst22": b["abst22"], "v": v, "profil": b["profil"]}
     top = {
-        "reserve": [court(b, b["reserve"]) for b in sorted([b for b in tous if b["reserve"] is not None], key=lambda b: -b["reserve"])[:300]],
-        "bascule": [court(b, b["bascule"]) for b in sorted([b for b in tous if b["bascule"] is not None], key=lambda b: -b["bascule"])[:300]],
-        "serre": [court(b, b["reserve"]) for b in sorted([b for b in tous if b["serre"] and b["reserve"] is not None], key=lambda b: -b["reserve"])[:300]],
+        "reserve": [court(b, b["reserve"]) for b in sorted([b for b in tous if b["reserve"] is not None], key=lambda b: -b["reserve"])[:1500]],
+        "bascule": [court(b, b["bascule"]) for b in sorted([b for b in tous if b["bascule"] is not None], key=lambda b: -b["bascule"])[:1500]],
+        "serre": [court(b, b["reserve"]) for b in sorted([b for b in tous if b["serre"] and b["reserve"] is not None], key=lambda b: -b["reserve"])[:1500]],
         "inscription": [{"code": k, "dep": c["dep"], "nom": c["nom"], "adultes": c["adultes"], "taux": c["taux"], "v": c["non_inscrits"]}
                         for k, c in sorted([x for x in toutes_communes.items() if x[1]["non_inscrits"]], key=lambda x: -x[1]["non_inscrits"])[:300]],
     }
@@ -294,7 +302,9 @@ def ecrit_france(france, tous, toutes_communes, formes):
         "serre": bornes(b["reserve"] for b in tous if b["serre"]),
         "inscription": bornes(taux.get(b["id"][:5]) for b in tous),
     }
-    (OUT / "france.json").write_text(json.dumps({"departements": france, "top": top, "bornes": echelles}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    pf = ROOT / "data" / "profils.json"
+    moyenne = json.loads(pf.read_text(encoding="utf-8"))["france"] if pf.exists() else None
+    (OUT / "france.json").write_text(json.dumps({"departements": france, "top": top, "bornes": echelles, "profil": moyenne}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     (OUT / "departements.json").write_text(json.dumps({"type": "FeatureCollection", "features": formes}, separators=(",", ":")), encoding="utf-8")
     # Index des communes pour la recherche : nom → département (le site charge ensuite le bon département).
     idx = sorted({(b["commune"], b["dep"]) for b in tous if b["commune"]})

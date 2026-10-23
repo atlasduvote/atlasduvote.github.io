@@ -23,6 +23,11 @@
                legende: "Bureaux serrés : réserve de mobilisation", depLegende: "Nombre de bureaux serrés" },
   };
 
+  // Profil Insee : [niveau de vie, ménages pauvres, 18-39 ans, 65 ans et plus, logements sociaux, propriétaires, habitants]
+  const QUARTIERS = {
+    populaire: p => p[1] >= 0.25, jeune: p => p[2] >= 0.45, hlm: p => p[4] != null && p[4] >= 0.4, seniors: p => p[3] >= 0.35,
+  };
+  const garde = b => { const q = $("quartier").value; return !q || (b.profil && QUARTIERS[q](b.profil)); };
   let ind = "reserve", france = null, depCouche = null, selection = null, communesIndex = null;
   const charges = {};          // dep -> { bureaux, communes, couche, parId }
   const enCours = {};          // dep -> promesse de chargement
@@ -46,7 +51,8 @@
   const styleBureau = f => {
     const b = charges[f.properties.dep]?.parId[f.properties.id];
     const c = teinte(classe(b ? IND[ind].val(b) : null, france.bornes[ind]));
-    return { color: css("--line"), weight: 0.4, fillColor: c || css("--bg"), fillOpacity: c ? 0.72 : 0.15 };
+    const visible = c && (IND[ind].communes || garde(b));
+    return { color: css("--line"), weight: 0.4, fillColor: c || css("--bg"), fillOpacity: visible ? 0.72 : c ? 0.1 : 0.15 };
   };
   const styleDep = f => {
     const c = teinte(classe(france.departements[f.properties.dep]?.[ind], bornesDeps()));
@@ -88,7 +94,7 @@
     const list = national
       ? france.top[ind].map(b => ({ ...b }))
       : visibles().map(b => ({ ...b, v: IND[ind].val(b) })).filter(b => b.v != null);
-    return list.filter(b => !q || nq(b.commune).includes(q)).sort((a, b) => b.v - a.v).slice(0, 15);
+    return list.filter(b => (!q || nq(b.commune).includes(q)) && garde(b)).sort((a, b) => b.v - a.v).slice(0, 15);
   }
 
   function liste() {
@@ -110,10 +116,22 @@
         <div><b>${fmt(b.reserve)}</b><span>${b.reserve == null ? "bureau atypique, hors classement" : `voix en réserve · ${ord(b.rang_reserve)} du département`}</span></div>
         <div><b>${fmt(b.bascule)}</b><span>${b.bascule == null ? "pas de comparaison possible avec 2017" : `voix basculées · ${ord(b.rang_bascule)} du département`}</span></div>
       </div>
-      ${c?.non_inscrits != null ? `<p class="note">Dans la commune : environ ${fmt(c.non_inscrits)} Français majeurs non inscrits sur ses listes (${pct(c.taux)}).</p>` : ""}
+      ${c?.non_inscrits ? `<p class="note">Dans la commune : environ ${fmt(c.non_inscrits)} Français majeurs non inscrits sur ses listes (${pct(c.taux)}).</p>` : ""}
+      ${profil(b.profil)}
       <table><thead><tr><th>Élection</th><th>Gauche</th><th>RN</th></tr></thead><tbody>
         ${ligne("Présidentielle 2017", "2017")}${ligne("Présidentielle 2022", "2022")}${ligne("Européennes 2024", "euro24")}${ligne("Législatives 2024", "legis24")}
       </tbody></table>`;
+  }
+
+  function profil(p) {
+    if (!p) return `<p class="note">Profil Insee non disponible pour ce bureau.</p>`;
+    const f = france.profil || [];
+    const l = (nom, v, m, fn) => `<tr><td>${nom}</td><td>${fn(v)}</td><td>${fn(m)}</td></tr>`;
+    const euros = v => v == null ? "–" : fmt(v) + " €";
+    return `<table><thead><tr><th>Profil du quartier (Insee 2021)</th><th>Bureau</th><th>France</th></tr></thead><tbody>
+      ${l("Niveau de vie moyen par an", p[0], f[0], euros)}${l("Ménages pauvres", p[1], f[1], pct)}
+      ${l("18-39 ans parmi les majeurs", p[2], f[2], pct)}${l("65 ans et plus parmi les majeurs", p[3], f[3], pct)}
+      ${l("Logements sociaux", p[4], f[4], pct)}${l("Ménages propriétaires", p[5], f[5], pct)}</tbody></table>`;
   }
 
   function charge(dep) {
@@ -169,6 +187,7 @@
     liste();
   }
 
+  $("quartier").addEventListener("change", redessine);
   $("indicateurs").addEventListener("click", e => {
     const b = e.target.closest("button[data-ind]"); if (!b) return;
     ind = b.dataset.ind;
